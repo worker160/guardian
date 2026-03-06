@@ -1,23 +1,23 @@
-# main.py
-# Discord Raid Detector Bot + Simple Web Dashboard (Flask)
-# Run bot async + web server in same process
+# main.py - Discord Raid Detector Bot with forced presence & better gateway debug
+# Fixes for "logged in but offline/no green dot" on hosted platforms
 
 import discord
 from discord.ext import commands
 import datetime
 from collections import deque
 import os
-from dotenv import load_dotenv
 import asyncio
-import threading
-from flask import Flask, render_template_string, jsonify
 import time
+from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv()  # for local; on host use env vars
 
 # ── Config ──
 BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+if not BOT_TOKEN:
+    raise ValueError("DISCORD_BOT_TOKEN is missing in environment variables!")
+
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))  # 0 = all servers
 MIN_ACCOUNT_AGE_DAYS = 7
 JOIN_WINDOW_SECONDS = 60
 MAX_JOINS_IN_WINDOW = 5
@@ -26,103 +26,94 @@ MOD_CHANNEL_ID = int(os.getenv("MOD_CHANNEL_ID", "0"))
 
 recent_joins = deque(maxlen=200)
 
-# Status tracking for web panel
-bot_status = {
-    "online": False,
-    "last_login": None,
-    "last_disconnect": None,
-    "disconnect_reason": "Unknown",
-    "uptime_start": None,
-    "recent_joins_count": 0
-}
-
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# ── Discord Events ──
 @bot.event
 async def on_ready():
-    now = datetime.datetime.now(datetime.UTC)
-    bot_status["online"] = True
-    bot_status["last_login"] = now.isoformat()
-    bot_status["uptime_start"] = time.time()
-    bot_status["disconnect_reason"] = "Connected successfully"
-    print(f'✅ Bot online: {bot.user}')
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] ✅ Logged in as {bot.user} (ID: {bot.user.id})')
+    print(f'Watching guild(s): {"All" if GUILD_ID == 0 else GUILD_ID}')
+    
+    # Force online status + activity (fixes many "invisible online" cases)
+    await bot.change_presence(
+        status=discord.Status.online,
+        afk=False,
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="for raids | !status"
+        )
+    )
+    print("Presence forced to ONLINE – check Discord member list now.")
+
+@bot.event
+async def on_connect():
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Gateway connected")
 
 @bot.event
 async def on_disconnect():
-    now = datetime.datetime.now(datetime.UTC)
-    bot_status["online"] = False
-    bot_status["last_disconnect"] = now.isoformat()
-    bot_status["disconnect_reason"] = "Gateway disconnected (check token/intents/network)"
-    print("!!! Bot disconnected !!!")
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] !!! Gateway DISCONNECTED – possible token/intents/rate limit issue')
 
 @bot.event
 async def on_resumed():
-    bot_status["online"] = True
-    bot_status["disconnect_reason"] = "Reconnected to gateway"
-    print("Bot resumed")
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Gateway RESUMED – connection restored')
 
-# Your on_member_join logic (unchanged, abbreviated for brevity)
+@bot.event
+async def on_error(event, *args, **kwargs):
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] ERROR in event {event}: {args} {kwargs}')
+
+# Your raid detection (add your full on_member_join logic here if different)
 @bot.event
 async def on_member_join(member: discord.Member):
-    # ... (your existing timeout logic here) ...
-    bot_status["recent_joins_count"] = len(recent_joins)
+    if GUILD_ID != 0 and member.guild.id != GUILD_ID:
+        return
+
+    now = datetime.datetime.now(datetime.UTC)
+    account_age_days = (now - member.created_at).days
+
+    recent_joins.append(now)
+    while recent_joins and (now - recent_joins[0]).total_seconds() > JOIN_WINDOW_SECONDS:
+        recent_joins.popleft()
+
+    is_mass = len(recent_joins) > MAX_JOINS_IN_WINDOW
+    is_young = account_age_days < MIN_ACCOUNT_AGE_DAYS
+
+    if is_young or is_mass:
+        duration = datetime.timedelta(minutes=TIMEOUT_MINUTES)
+        reason = f"Suspicious: age={account_age_days}d | mass_join={is_mass}"
+        try:
+            await member.timeout_for(duration=duration, reason=reason)
+            print(f"Timed out {member} ({member.id}) - {reason}")
+            if MOD_CHANNEL_ID:
+                ch = bot.get_channel(MOD_CHANNEL_ID)
+                if ch:
+                    await ch.send(f"🚨 Timed out {member.mention}: {reason}")
+        except Exception as e:
+            print(f"Timeout failed for {member}: {e}")
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def status(ctx):
-    await ctx.send(f"Bot online: {bot_status['online']}\nLast disconnect: {bot_status.get('disconnect_reason', 'N/A')}")
+    await ctx.send(
+        f"**Guardian Bot Status**\n"
+        f"Online (per code): Yes\n"
+        f"Uptime: Running since login\n"
+        f"Recent joins tracked: {len(recent_joins)}\n"
+        f"Check member list for green dot."
+    )
 
-# ── Flask Web Dashboard ──
-web_app = Flask(__name__)
-
-@web_app.route('/')
-def dashboard():
-    uptime = "N/A"
-    if bot_status["uptime_start"]:
-        seconds = time.time() - bot_status["uptime_start"]
-        uptime = f"{int(seconds // 3600)}h {int((seconds % 3600) // 60)}m {int(seconds % 60)}s"
-
-    html = f"""
-    <html>
-    <head><title>Bot Guardian Panel</title></head>
-    <body>
-        <h1>Guardian Bot Dashboard</h1>
-        <p><strong>Status:</strong> {"Online 🟢" if bot_status["online"] else "Offline 🔴"}</p>
-        <p><strong>Why offline (if applicable):</strong> {bot_status["disconnect_reason"]}</p>
-        <p><strong>Last login:</strong> {bot_status.get("last_login", "Never")}</p>
-        <p><strong>Last disconnect:</strong> {bot_status.get("last_disconnect", "N/A")}</p>
-        <p><strong>Uptime:</strong> {uptime}</p>
-        <p><strong>Recent joins tracked:</strong> {bot_status["recent_joins_count"]}</p>
-        <p><strong>Config:</strong> Age < {MIN_ACCOUNT_AGE_DAYS}d | Max joins {MAX_JOINS_IN_WINDOW}/{JOIN_WINDOW_SECONDS}s | Timeout {TIMEOUT_MINUTES} min</p>
-        <hr>
-        <p>Refresh page for updates. Check JustRunMy.app logs for detailed errors.</p>
-    </body>
-    </html>
-    """
-    return render_template_string(html)
-
-@web_app.route('/api/status')
-def api_status():
-    return jsonify(bot_status)
-
-# ── Run bot + web server ──
-def run_flask():
-    web_app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
+# Periodic log to keep activity visible in container logs
+async def log_activity():
+    while True:
+        await asyncio.sleep(60)
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Heartbeat – bot still running, recent joins: {len(recent_joins)}")
 
 async def main():
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    print("Web dashboard started on port 8080")
-    await bot.start(BOT_TOKEN)
+    asyncio.create_task(log_activity())
+    await bot.start(BOT_TOKEN, reconnect=True)
 
 if __name__ == "__main__":
-    if not BOT_TOKEN:
-        raise ValueError("DISCORD_BOT_TOKEN missing!")
-    
-    # JustRunMy.app will expose port 8080 as HTTPS automatically
+    print("Starting bot with forced presence & debug logging...")
     asyncio.run(main())
