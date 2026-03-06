@@ -4,6 +4,7 @@
 import discord
 from discord.ext import commands
 import datetime
+from datetime import timezone              # ← ADDED THIS
 from collections import deque
 import os
 import asyncio
@@ -50,7 +51,7 @@ async def on_ready():
 
 @bot.event
 async def on_connect():
-    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Gateway connected")
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] Gateway connected')   # ← FIXED: added missing '
 
 @bot.event
 async def on_disconnect():
@@ -64,13 +65,13 @@ async def on_resumed():
 async def on_error(event, *args, **kwargs):
     print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] ERROR in event {event}: {args} {kwargs}')
 
-# Your raid detection (add your full on_member_join logic here if different)
+# Your raid detection
 @bot.event
 async def on_member_join(member: discord.Member):
     if GUILD_ID != 0 and member.guild.id != GUILD_ID:
         return
 
-    now = datetime.datetime.now(datetime.UTC)
+    now = datetime.datetime.now(timezone.utc)           # ← FIXED: was datetime.UTC
     account_age_days = (now - member.created_at).days
 
     recent_joins.append(now)
