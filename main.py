@@ -26,7 +26,7 @@ recent_joins = deque(maxlen=200)
 
 intents = discord.Intents.default()
 intents.members = True  # For member join events
-intents.message_content = True 
+intents.message_content = True # This line MUST be here for prefix commands
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 @bot.event
